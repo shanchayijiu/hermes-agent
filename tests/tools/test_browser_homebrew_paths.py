@@ -24,10 +24,14 @@ def _clear_browser_caches():
     _discover_homebrew_node_dirs.cache_clear()
     _bt._cached_agent_browser = None
     _bt._agent_browser_resolved = False
+    _bt._cached_local_stealth_enabled = None
+    _bt._local_stealth_resolved = False
     yield
     _discover_homebrew_node_dirs.cache_clear()
     _bt._cached_agent_browser = None
     _bt._agent_browser_resolved = False
+    _bt._cached_local_stealth_enabled = None
+    _bt._local_stealth_resolved = False
 
 
 class TestSanePath:
@@ -332,6 +336,58 @@ class TestRunBrowserCommandPathConstruction:
 
         assert captured_cmd is not None
         assert captured_cmd[:2] == ["npx", "agent-browser"]
+        assert captured_cmd[2:6] == [
+            "--session",
+            "test-session",
+            "--json",
+            "navigate",
+        ]
+
+    def test_local_stealth_rewrites_npx_command_when_enabled(self, tmp_path):
+        """Local sessions should switch to the stealth CLI when enabled."""
+        captured_cmd = None
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.wait.return_value = 0
+
+        def capture_popen(cmd, **kwargs):
+            nonlocal captured_cmd
+            captured_cmd = cmd
+            return mock_proc
+
+        fake_session = {
+            "session_name": "test-session",
+            "session_id": "test-id",
+            "cdp_url": None,
+        }
+        fake_json = json.dumps({"success": True})
+        hermes_home = str(tmp_path / "hermes-home")
+
+        with patch("tools.browser_tool._find_agent_browser", return_value="npx agent-browser"), \
+             patch("tools.browser_tool._get_session_info", return_value=fake_session), \
+             patch("tools.browser_tool._socket_safe_tmpdir", return_value=str(tmp_path)), \
+             patch("tools.browser_tool._discover_homebrew_node_dirs", return_value=[]), \
+             patch("hermes_constants.Path.home", return_value=tmp_path), \
+             patch("subprocess.Popen", side_effect=capture_popen), \
+             patch("os.open", return_value=99), \
+             patch("os.close"), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.dict(
+                 os.environ,
+                 {
+                     "PATH": "/usr/bin:/bin",
+                     "HOME": "/home/test",
+                     "HERMES_HOME": hermes_home,
+                     "AGENT_BROWSER_STEALTH": "true",
+                 },
+                 clear=True,
+             ):
+            with patch("builtins.open", mock_open(read_data=fake_json)):
+                _run_browser_command("test-task", "navigate", ["https://example.com"])
+
+        assert captured_cmd is not None
+        assert captured_cmd[:2] == ["npx", "agent-browser-stealth"]
         assert captured_cmd[2:6] == [
             "--session",
             "test-session",

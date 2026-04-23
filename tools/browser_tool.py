@@ -173,6 +173,8 @@ _EMPTY_OK_COMMANDS: frozenset = frozenset({"close", "record"})
 
 _cached_command_timeout: Optional[int] = None
 _command_timeout_resolved = False
+_cached_local_stealth_enabled: Optional[bool] = None
+_local_stealth_resolved = False
 
 
 def _get_command_timeout() -> int:
@@ -198,6 +200,49 @@ def _get_command_timeout() -> int:
         logger.debug("Could not read command_timeout from config: %s", e)
     _cached_command_timeout = result
     return result
+
+
+def _local_stealth_enabled() -> bool:
+    """Return whether Hermes should launch the local stealth browser package.
+
+    Sources, in precedence order:
+    1. ``AGENT_BROWSER_STEALTH`` environment variable
+    2. ``browser.local.stealth`` in config.yaml
+
+    This only affects local browser sessions. Remote CDP/cloud sessions are left
+    unchanged because their browser engine is controlled elsewhere.
+    """
+    global _cached_local_stealth_enabled, _local_stealth_resolved
+    if _local_stealth_resolved:
+        return bool(_cached_local_stealth_enabled)
+
+    _local_stealth_resolved = True
+    result = False
+
+    env_val = os.environ.get("AGENT_BROWSER_STEALTH", "").strip().lower()
+    if env_val:
+        result = env_val in {"1", "true", "yes", "on"}
+    else:
+        try:
+            from hermes_cli.config import read_raw_config
+            cfg = read_raw_config()
+            result = bool(cfg.get("browser", {}).get("local", {}).get("stealth"))
+        except Exception as e:
+            logger.debug("Could not read browser.local.stealth from config: %s", e)
+
+    _cached_local_stealth_enabled = result
+    return result
+
+
+def _rewrite_local_browser_command_for_stealth(browser_cmd: str, session_info: Dict[str, Any]) -> str:
+    """Swap the local agent-browser package for the stealth fork when enabled."""
+    if session_info.get("cdp_url"):
+        return browser_cmd
+    if not _local_stealth_enabled():
+        return browser_cmd
+    if browser_cmd == "npx agent-browser":
+        return "npx agent-browser-stealth"
+    return browser_cmd
 
 
 def _get_vision_model() -> Optional[str]:
@@ -1152,9 +1197,14 @@ def _run_browser_command(
         # Local mode — launch a headless Chromium instance
         backend_args = ["--session", session_info["session_name"]]
 
+    browser_cmd = _rewrite_local_browser_command_for_stealth(browser_cmd, session_info)
+
     # Keep concrete executable paths intact, even when they contain spaces.
-    # Only the synthetic npx fallback needs to expand into multiple argv items.
-    cmd_prefix = ["npx", "agent-browser"] if browser_cmd == "npx agent-browser" else [browser_cmd]
+    # Synthetic npx fallbacks need to expand into multiple argv items.
+    if browser_cmd.startswith("npx "):
+        cmd_prefix = browser_cmd.split()
+    else:
+        cmd_prefix = [browser_cmd]
 
     cmd_parts = cmd_prefix + backend_args + [
         "--json",
@@ -2332,11 +2382,14 @@ def cleanup_all_browsers() -> None:
     # Reset cached lookups so they are re-evaluated on next use.
     global _cached_agent_browser, _agent_browser_resolved
     global _cached_command_timeout, _command_timeout_resolved
+    global _cached_local_stealth_enabled, _local_stealth_resolved
     _cached_agent_browser = None
     _agent_browser_resolved = False
     _discover_homebrew_node_dirs.cache_clear()
     _cached_command_timeout = None
     _command_timeout_resolved = False
+    _cached_local_stealth_enabled = None
+    _local_stealth_resolved = False
 
 
 # ============================================================================
